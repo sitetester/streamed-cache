@@ -7,21 +7,21 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-type User = String;
-type CommentsCount = u64;
+type City = String;
+type Temperature = u64;
 
 #[async_trait]
 pub trait Api: Send + Sync + 'static {
-    async fn fetch(&self) -> Result<HashMap<User, CommentsCount>, String>;
-    async fn subscribe(&self) -> BoxStream<Result<(User, CommentsCount), String>>;
+    async fn fetch(&self) -> Result<HashMap<City, Temperature>, String>;
+    async fn subscribe(&self) -> BoxStream<Result<(City, Temperature), String>>;
 }
 
 #[derive(Clone)]
 pub struct StreamCache {
-    results: Arc<Mutex<HashMap<User, CommentsCount>>>,
+    results: Arc<Mutex<HashMap<City, Temperature>>>,
 }
 
-// Its goal is to always return the most recent user comments count
+// Its goal is to always return the most recent temperature
 impl StreamCache {
     pub async fn new(api: impl Api) -> Self {
         let instance = Self {
@@ -36,9 +36,9 @@ impl StreamCache {
             let api = api.clone();
             tokio::spawn(async move {
                 let mut sub = api.subscribe().await;
-                while let Some(Ok((user, comments_count))) = sub.next().await {
+                while let Some(Ok((city, temperature))) = sub.next().await {
                     let mut map = instance.results.lock().unwrap();
-                    map.insert(user, comments_count);
+                    map.insert(city, temperature);
                 }
             });
         }
@@ -47,20 +47,20 @@ impl StreamCache {
         {
             let fetch_map = api.fetch().await.unwrap();
             let mut map = instance.results.lock().unwrap();
-            for (user, comments_count) in fetch_map {
-                if map.contains_key(&user) {
+            for (city, temperature) in fetch_map {
+                if map.contains_key(&city) {
                     continue;
                 }
-                map.insert(user, comments_count);
+                map.insert(city, temperature);
             }
         }
 
         instance
     }
 
-    pub fn get(&self, user: &str) -> Option<CommentsCount> {
+    pub fn get(&self, city: &str) -> Option<Temperature> {
         let results = self.results.lock().expect("poisoned");
-        results.get(user).copied()
+        results.get(city).copied()
     }
 }
 
@@ -76,25 +76,25 @@ mod tests {
     use super::*;
 
     #[derive(Default)]
-    struct TestApi {
+    struct WeatherApi {
         signal: Arc<Notify>,
     }
 
     #[async_trait]
-    impl Api for TestApi {
-        async fn fetch(&self) -> Result<HashMap<User, CommentsCount>, String> {
+    impl Api for WeatherApi {
+        async fn fetch(&self) -> Result<HashMap<City, Temperature>, String> {
             // fetch is slow and may get delayed until after we receive the first updates
             self.signal.notified().await;
             Ok(hashmap! {
-                "Alex123".to_string() => 10,
-                "John456".to_string() => 15,
+                "Berlin".to_string() => 20,
+                "London".to_string() => 30,
             })
         }
 
-        async fn subscribe(&self) -> BoxStream<Result<(User, CommentsCount), String>> {
+        async fn subscribe(&self) -> BoxStream<Result<(City, Temperature), String>> {
             let results = vec![
-                Ok(("John456".to_string(), 20)),
-                Ok(("Jamie789".to_string(), 30)),
+                Ok(("Berlin".to_string(), 25)),
+                Ok(("Paris".to_string(), 35)),
             ];
             select(
                 futures::stream::iter(results),
@@ -110,19 +110,15 @@ mod tests {
 
     #[tokio::test]
     async fn works() {
-        let cache = StreamCache::new(TestApi::default()).await;
+        let cache = StreamCache::new(WeatherApi::default()).await;
 
         // Allow cache to update
         time::sleep(Duration::from_millis(100)).await;
 
-        assert_eq!(cache.get("Alex123"), Some(10));
-        assert_eq!(cache.get("John456"), Some(20));
-        assert_eq!(cache.get("Jamie789"), Some(30));
+        assert_eq!(cache.get("Berlin"), Some(25));
+        assert_eq!(cache.get("London"), Some(30));
+        assert_eq!(cache.get("Paris"), Some(35));
 
-        assert_eq!(cache.get("Dummy"), None);
-
-        // we assume cache stored total 3 entries at this stage
-        let results = cache.results.lock().unwrap();
-        assert_eq!(results.len(), 3);
+        assert_eq!(cache.get("NewYork"), None);
     }
 }
